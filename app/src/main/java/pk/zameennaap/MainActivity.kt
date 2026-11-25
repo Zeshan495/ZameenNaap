@@ -6,10 +6,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -23,8 +26,13 @@ import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -40,6 +48,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private val navItems = mutableListOf<Pair<ImageView, TextView>>()
     private val handler = Handler(Looper.getMainLooper())
     private var lm: LocationManager? = null
+    private var tone: ToneGenerator? = null
 
     // ---- GPS mode state ----
     private val corners = mutableListOf<Corner>()
@@ -52,6 +61,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private var gpsArea: TextView? = null
     private var gpsSub: TextView? = null
     private var captureBtn: TextView? = null
+    private var captureProg: ProgressBar? = null
 
     // ---- Manual mode state ----
     private var shape = 1          // 0 rectangle, 1 four sides, 2 triangle
@@ -67,6 +77,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private fun t(en: String, ur: String) = if (urdu) ur else en
     private fun f1(v: Double) = String.format(Locale.US, "%.1f", v)
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
+    private val dirFlag get() = if (urdu) View.LAYOUT_DIRECTION_RTL else View.LAYOUT_DIRECTION_LTR
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,11 +86,18 @@ class MainActivity : AppCompatActivity(), LocationListener {
         urdu = prefs.getBoolean("urdu", true)
         mode = if (prefs.getBoolean("society", false)) MarlaMode.SOCIETY else MarlaMode.REVENUE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.statusBarColor = Ui.GREEN
+        // Draw edge-to-edge on every Android version (Android 15 forces it anyway)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        @Suppress("DEPRECATION")
+        run { window.statusBarColor = Color.TRANSPARENT; window.navigationBarColor = Color.WHITE }
         lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        tone = runCatching { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 90) }.getOrNull()
         build()
         if (!hasGps()) requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 7)
+        if (!prefs.getBoolean("seenIntro", false)) showIntro()
     }
+
+    override fun onDestroy() { super.onDestroy(); tone?.release() }
 
     private fun hasGps() = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
@@ -104,31 +122,30 @@ class MainActivity : AppCompatActivity(), LocationListener {
     }
 
     // =====================================================================
-    // Layout: top bar, content, bottom navigation
+    // Layout: top bar, page (scroll + sticky action bar), bottom navigation
     // =====================================================================
     private fun build() {
         navItems.clear()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ui.BG)
-            layoutDirection = if (urdu) View.LAYOUT_DIRECTION_RTL else View.LAYOUT_DIRECTION_LTR
+            layoutDirection = dirFlag
         }
 
-        // Top bar
         val top = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Ui.GREEN)
-            setPadding(dp(18), dp(14), dp(12), dp(14))
         }
         val titles = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         titles.addView(text(t("Zameen Naap", "زمین ناپ"), 22f, Color.WHITE, true))
         titles.addView(text(t("Land measurement • works offline", "زمین کی پیمائش • بغیر انٹرنیٹ"), 12f, Color.rgb(190, 225, 205)))
         top.addView(titles, lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         fun topPill(s: String, click: () -> Unit) = TextView(this).apply {
-            text = s; textSize = 13f; setTextColor(Color.WHITE)
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = rounded(Color.argb(45, 255, 255, 255), 16)
+            text = s; textSize = 13f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            minHeight = dp(40)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = rounded(Color.argb(45, 255, 255, 255), 20)
             setOnClickListener { click() }
         }
         top.addView(topPill(if (urdu) "English" else "اردو") {
@@ -142,12 +159,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
         content = FrameLayout(this)
         root.addView(content, lp(h = 0, weight = 1f))
 
-        // Bottom navigation
         val nav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.WHITE)
             elevation = dp(8).toFloat()
-            setPadding(0, dp(6), 0, dp(8))
         }
         val tabs = listOf(
             Triple(R.drawable.ic_gps, "GPS walk", "GPS سے ناپیں"),
@@ -157,6 +172,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
         tabs.forEachIndexed { i, (icon, en, ur) ->
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                minimumHeight = dp(56)
                 setOnClickListener { saveManualVals(); showTab(i) }
             }
             val iv = ImageView(this).apply { setImageResource(icon) }
@@ -167,7 +183,23 @@ class MainActivity : AppCompatActivity(), LocationListener {
             nav.addView(item, lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
         root.addView(nav)
+
+        // Keep the bars clear of the status bar, gesture bar and keyboard
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, ins ->
+            val bars = ins.getInsets(WindowInsetsCompat.Type.systemBars())
+            val imeOn = ins.isVisible(WindowInsetsCompat.Type.ime())
+            val ime = ins.getInsets(WindowInsetsCompat.Type.ime())
+            top.setPaddingRelative(dp(18), bars.top + dp(12), dp(12), dp(12))
+            nav.setPadding(0, dp(4), 0, dp(4) + bars.bottom)
+            nav.visibility = if (imeOn) View.GONE else View.VISIBLE   // more room while typing
+            root.setPadding(bars.left, 0, bars.right, if (imeOn) ime.bottom else 0)
+            WindowInsetsCompat.CONSUMED
+        }
         setContentView(root)
+        WindowInsetsControllerCompat(window, root).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = true
+        }
         showTab(tab)
     }
 
@@ -178,63 +210,97 @@ class MainActivity : AppCompatActivity(), LocationListener {
             iv.setColorFilter(c); tv.setTextColor(c)
             tv.setTypeface(null, if (j == i) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
         }
-        gpsView = null; manView = null
+        gpsView = null; manView = null; captureProg = null
         content.removeAllViews()
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(14), dp(14), dp(24))
+            setPadding(dp(12), dp(12), dp(12), dp(16))
+        }
+        // Sticky bar: the main result + main buttons stay visible, always under the thumb
+        val sticky = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            elevation = dp(10).toFloat()
+            setPadding(dp(14), dp(10), dp(14), dp(10))
         }
         when (i) {
-            0 -> buildGps(col)
-            1 -> buildManual(col)
+            0 -> buildGps(col, sticky)
+            1 -> buildManual(col, sticky)
             else -> buildSaved(col)
         }
-        content.addView(ScrollView(this).apply { addView(col); isFillViewport = true })
+        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        page.addView(ScrollView(this).apply { addView(col); isFillViewport = true }, lp(h = 0, weight = 1f))
+        if (sticky.childCount > 0) page.addView(sticky)
+        content.addView(page)
     }
 
     // =====================================================================
     // TAB 1: GPS walk-around
     // =====================================================================
-    private fun buildGps(col: LinearLayout) {
-        val status = card().apply { setPadding(dp(16), dp(10), dp(16), dp(10)) }
-        gpsStatus = text("", 14f, Ui.MUTED, true)
-        status.addView(gpsStatus)
-        col.addView(status)
+    private fun buildGps(col: LinearLayout, sticky: LinearLayout) {
+        // Status pill
+        gpsStatus = text("", 14f, Ui.MUTED, true).apply {
+            background = rounded(Color.WHITE, 22, Ui.LINE)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        col.addView(gpsStatus, lp().apply { bottomMargin = dp(10) })
 
-        val mapCard = card().apply { setPadding(dp(8), dp(8), dp(8), dp(8)) }
+        // Big field drawing: about half the screen
+        val mapCard = card().apply { setPadding(dp(6), dp(6), dp(6), dp(6)) }
         gpsView = FieldView(this)
-        mapCard.addView(gpsView, lp(h = dp(300)))
+        val mapH = (resources.displayMetrics.heightPixels * 0.46).toInt()
+        mapCard.addView(gpsView, lp(h = mapH))
         col.addView(mapCard)
 
-        val res = card()
-        res.addView(text(t("Area", "رقبہ"), 13f, Ui.MUTED))
-        gpsArea = text("", 24f, Ui.GREEN, true)
-        gpsSub = text("", 13f, Ui.MUTED)
-        res.addView(gpsArea); res.addView(gpsSub)
-        col.addView(res)
-
-        captureBtn = button(t("＋  Mark corner here", "＋  یہاں کونا لگائیں")) { startCapture() }
-        col.addView(captureBtn, lp().apply { bottomMargin = dp(8) })
-
-        val undo = button(t("Undo", "واپس"), false) {
-            if (corners.isNotEmpty()) corners.removeAt(corners.size - 1); refreshGps()
-        }
-        val auto = button(if (autoWalk) t("Auto: ON", "خودکار: آن") else t("Auto walk", "چلتے ہوئے"), !autoWalk) {}
-        auto.setOnClickListener {
-            autoWalk = !autoWalk
-            toast(if (autoWalk) t("Auto mode: walk along the boundary, a point is added every 3 m",
-                "خودکار: حد کے ساتھ چلیں، ہر 3 میٹر پر نقطہ لگے گا") else t("Auto mode off", "خودکار بند"))
-            showTab(0)
-        }
-        val clear = button(t("Clear", "صاف کریں"), false) {
+        val clear = button(t("Clear all corners", "سارے کونے مٹائیں"), false, small = true) {
             if (corners.isEmpty()) return@button
             AlertDialog.Builder(this).setMessage(t("Remove all corners?", "سارے کونے مٹا دیں؟"))
                 .setPositiveButton(t("Yes", "ہاں")) { _, _ -> corners.clear(); refreshGps() }
                 .setNegativeButton(t("No", "نہیں"), null).show()
         }
-        col.addView(row(undo, auto, clear), lp().apply { bottomMargin = dp(8) })
+        col.addView(clear, lp().apply { bottomMargin = dp(12) })
 
-        col.addView(button(t("✓  Save this field", "✓  زمین محفوظ کریں")) {
+        val tips = card()
+        tips.addView(text(t("How to measure", "کیسے ناپیں"), 15f, Ui.TEXT, true))
+        tips.addView(text(t(
+            "1. Stand in open sky (not under trees) until the light is green.\n" +
+            "2. Stand exactly on corner 1 → press \"Mark corner\" → stay still 8 seconds (beep).\n" +
+            "3. Walk to the next corner IN ORDER around the field and repeat.\n" +
+            "4. Curved edge? Turn on \"Auto\" and walk along the boundary.\n" +
+            "Small plot? Use the \"By hand\" tab with a tape for best accuracy.",
+            "1۔ کھلے آسمان تلے (درختوں سے دور) کھڑے ہوں جب تک روشنی سبز نہ ہو۔\n" +
+            "2۔ پہلے کونے پر بالکل کھڑے ہو کر \"کونا لگائیں\" دبائیں، 8 سیکنڈ ساکت رہیں (بیپ آئے گی)۔\n" +
+            "3۔ کھیت کے گرد ترتیب سے اگلے کونے پر جائیں اور یہی کریں۔\n" +
+            "4۔ حد ٹیڑھی ہو تو \"خودکار\" آن کر کے حد کے ساتھ چلیں۔\n" +
+            "چھوٹا پلاٹ؟ زیادہ درستگی کے لیے \"ہاتھ سے\" والا حصہ فیتے کے ساتھ استعمال کریں۔"),
+            14f, Ui.MUTED).apply { setPadding(0, dp(6), 0, 0) })
+        col.addView(tips)
+
+        // ---- Sticky bottom: result + actions ----
+        gpsArea = text("", 21f, Ui.GREEN, true)
+        gpsSub = text("", 12f, Ui.MUTED).apply { maxLines = 3 }
+        sticky.addView(gpsArea); sticky.addView(gpsSub)
+        captureBtn = button(t("＋  Mark corner here", "＋  یہاں کونا لگائیں")) { startCapture() }.apply {
+            textSize = 18f; minHeight = dp(56)
+        }
+        sticky.addView(captureBtn, lp().apply { topMargin = dp(8) })
+        captureProg = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 8; progress = 0; visibility = if (capturing) View.VISIBLE else View.GONE
+            progressTintList = ColorStateList.valueOf(Ui.GREEN2)
+        }
+        sticky.addView(captureProg, lp())
+
+        val undo = button(t("↶ Undo", "↶ واپس"), false, small = true) {
+            if (corners.isNotEmpty()) corners.removeAt(corners.size - 1); refreshGps()
+        }
+        val auto = button(if (autoWalk) t("Auto: ON", "خودکار: آن") else t("Auto", "خودکار"), autoWalk, small = true) {}
+        auto.setOnClickListener {
+            autoWalk = !autoWalk
+            toast(if (autoWalk) t("Auto: walk along the boundary, a point is added every 3 m",
+                "خودکار: حد کے ساتھ چلیں، ہر 3 میٹر پر نقطہ لگے گا") else t("Auto off", "خودکار بند"))
+            showTab(0)
+        }
+        val save = button(t("✓ Save", "✓ محفوظ"), false, small = true) {
             if (corners.size < 3) { toast(t("Mark at least 3 corners first", "پہلے کم از کم 3 کونے لگائیں")); return@button }
             val sqft = gpsSqft()
             askName { name ->
@@ -243,25 +309,8 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 corners.clear(); refreshGps()
                 toast(t("Saved", "محفوظ ہو گیا"))
             }
-        }, lp().apply { bottomMargin = dp(12) })
-
-        val tips = card()
-        tips.addView(text(t("How to measure", "کیسے ناپیں"), 15f, Ui.TEXT, true))
-        tips.addView(text(t(
-            "1. Go to the field in open sky (not under trees).\n" +
-            "2. Wait until accuracy is ±5 m or better (green).\n" +
-            "3. Stand exactly on corner 1 and press \"Mark corner\". Stay still for 8 seconds.\n" +
-            "4. Walk to the next corner IN ORDER around the field and repeat.\n" +
-            "5. For curved edges use \"Auto walk\" and walk along the boundary.\n" +
-            "Tip: bigger fields give more accurate results. For small plots use the \"By hand\" tab.",
-            "1۔ کھیت میں کھلے آسمان تلے جائیں (درختوں کے نیچے نہیں)۔\n" +
-            "2۔ درستگی ±5 میٹر یا بہتر (سبز) ہونے تک انتظار کریں۔\n" +
-            "3۔ پہلے کونے پر بالکل کھڑے ہو کر \"کونا لگائیں\" دبائیں۔ 8 سیکنڈ ساکت رہیں۔\n" +
-            "4۔ کھیت کے گرد ترتیب سے اگلے کونے پر جائیں اور یہی کریں۔\n" +
-            "5۔ ٹیڑھی حد کے لیے \"چلتے ہوئے\" آن کر کے حد کے ساتھ چلیں۔\n" +
-            "مشورہ: بڑے کھیت میں نتیجہ زیادہ درست آتا ہے۔ چھوٹے پلاٹ کے لیے \"ہاتھ سے\" والا حصہ استعمال کریں۔"),
-            14f, Ui.MUTED))
-        col.addView(tips)
+        }
+        sticky.addView(row(undo, auto, save), lp().apply { topMargin = dp(8) })
         refreshGps()
     }
 
@@ -280,8 +329,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
         val status = gpsStatus ?: return
         val fix = lastFix
         val gpsOn = lm?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true
+        status.setOnClickListener(null)
         when {
-            !hasGps() -> { status.text = t("Location permission needed. Tap here.", "لوکیشن کی اجازت چاہیے۔ یہاں دبائیں۔"); status.setTextColor(Ui.RED)
+            !hasGps() -> { status.text = t("● Location permission needed. Tap here.", "● لوکیشن کی اجازت چاہیے۔ یہاں دبائیں۔"); status.setTextColor(Ui.RED)
                 status.setOnClickListener { requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 7) } }
             !gpsOn -> { status.text = t("● GPS is off. Tap to turn on.", "● GPS بند ہے۔ آن کرنے کے لیے دبائیں۔"); status.setTextColor(Ui.RED)
                 status.setOnClickListener { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) } }
@@ -289,8 +339,8 @@ class MainActivity : AppCompatActivity(), LocationListener {
             else -> {
                 val acc = fix.accuracy
                 val q = when { acc <= 5 -> t("Excellent", "بہترین"); acc <= 10 -> t("OK", "ٹھیک"); else -> t("Weak, wait", "کمزور، انتظار کریں") }
-                status.text = t("● GPS accuracy ±%.0f m  •  %s", "● GPS درستگی ±%.0f میٹر  •  %s").format(Locale.US, acc, q) +
-                        if (capturing) t("  •  recording corner…", "  •  کونا محفوظ ہو رہا ہے…") else ""
+                status.text = t("● GPS ±%.0f m  •  %s", "● GPS درستگی ±%.0f میٹر  •  %s").format(Locale.US, acc, q) +
+                        if (capturing) t("  •  recording…", "  •  محفوظ ہو رہا ہے…") else ""
                 status.setTextColor(when { acc <= 5 -> Ui.GREEN2; acc <= 10 -> Ui.AMBER; else -> Ui.RED })
             }
         }
@@ -309,11 +359,11 @@ class MainActivity : AppCompatActivity(), LocationListener {
             val sig = Geo.areaSigma(pts, corners.map { it.sigmaM }) * Units.SQM_TO_SQFT
             val perFt = Geo.perimeter(pts) * 3.2808399
             gpsArea?.text = Units.breakdown(sqft, mode, urdu)
-            var sub = t("≈ %s acre  •  ± %s marla  •  boundary %s karam (%s ft)  •  %d corners",
-                "≈ %s ایکڑ  •  ± %s مرلہ  •  حد %s کرم (%s فٹ)  •  %d کونے").format(
-                Units.num(sqft / Units.ACRE), f1(sig / Units.marla(mode)), Units.num(perFt / karam), Units.num(perFt), pts.size)
-            if (Geo.selfIntersects(pts)) sub += t("\n⚠ Lines cross: corners were marked out of order. Undo and redo.",
-                "\n⚠ لکیریں ایک دوسرے کو کاٹ رہی ہیں: کونے ترتیب سے نہیں لگے۔ واپس کر کے دوبارہ لگائیں۔")
+            var sub = t("≈ %s acre  •  ± %s marla  •  boundary %s karam  •  %d corners",
+                "≈ %s ایکڑ  •  ± %s مرلہ  •  حد %s کرم  •  %d کونے").format(
+                Units.num(sqft / Units.ACRE), f1(sig / Units.marla(mode)), Units.num(perFt / karam), pts.size)
+            if (Geo.selfIntersects(pts)) sub += t("\n⚠ Lines cross: corners out of order. Undo and redo.",
+                "\n⚠ لکیریں آپس میں کٹ رہی ہیں: کونے ترتیب سے نہیں۔ واپس کر کے دوبارہ لگائیں۔")
             gpsSub?.text = sub
         } else {
             gpsArea?.text = t("Mark %d more corner(s)", "مزید %d کونے لگائیں").format(Locale.US, 3 - pts.size)
@@ -329,9 +379,11 @@ class MainActivity : AppCompatActivity(), LocationListener {
         }
         capturing = true
         captureBuf.clear(); captureBuf.add(f)
+        captureProg?.visibility = View.VISIBLE
         handler.post(object : Runnable {
             var left = 8
             override fun run() {
+                captureProg?.progress = 8 - left
                 if (left <= 0) { finishCapture(); return }
                 captureBtn?.text = t("Stay still… %d", "ساکت رہیں… %d").format(Locale.US, left)
                 left--
@@ -346,8 +398,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
         if (captureBuf.isNotEmpty()) {
             corners.add(Geo.averageFixes(captureBuf.map { Triple(it.latitude, it.longitude, it.accuracy.toDouble()) }))
             vibrate()
+            runCatching { tone?.startTone(ToneGenerator.TONE_PROP_ACK, 200) }
         }
         captureBtn?.text = t("＋  Mark corner here", "＋  یہاں کونا لگائیں")
+        captureProg?.visibility = View.GONE
         refreshGps()
     }
 
@@ -381,14 +435,39 @@ class MainActivity : AppCompatActivity(), LocationListener {
         if (inputs.isNotEmpty()) manualVals = inputs.map { it.text.toString() }.toMutableList()
     }
 
-    private fun buildManual(col: LinearLayout) {
+    private fun numberInput(label: String, index: Int): LinearLayout {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(text(label, 13f, Ui.MUTED).apply { setPadding(dp(2), 0, dp(2), dp(4)) })
+        val e = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            textSize = 20f; setTextColor(Ui.TEXT); hint = "0"
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            background = rounded(Ui.BG, 12, Ui.LINE)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            textDirection = View.TEXT_DIRECTION_LTR
+            gravity = Gravity.CENTER
+            imeOptions = EditorInfo.IME_ACTION_NEXT
+            setSelectAllOnFocus(true)
+            setText(manualVals.getOrNull(index) ?: "")
+            addTextChangedListener(object : TextWatcher {
+                override fun afterTextChanged(s: Editable?) = recomputeManual()
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
+        }
+        inputs.add(e)
+        box.addView(e, lp())
+        return box
+    }
+
+    private fun buildManual(col: LinearLayout, sticky: LinearLayout) {
         inputs.clear()
         val shapeCard = card()
         shapeCard.addView(text(t("Field shape", "کھیت کی شکل"), 13f, Ui.MUTED))
-        val shapes = listOf(t("Rectangle", "مستطیل"), t("4 sides", "چار اطراف"), t("Triangle", "تکون"))
+        val shapes = listOf(t("▭ Rectangle", "▭ مستطیل"), t("▱ 4 sides", "▱ چار اطراف"), t("△ Triangle", "△ تکون"))
         shapeCard.addView(row(*shapes.mapIndexed { i, s ->
             chip(s, i == shape) { if (shape != i) { shape = i; manualVals.clear(); showTab(1) } }
-        }.toTypedArray()), lp().apply { topMargin = dp(8) })
+        }.toTypedArray(), gapDp = 6), lp().apply { topMargin = dp(8) })
         shapeCard.addView(text(t("Measuring in", "پیمائش کی اکائی"), 13f, Ui.MUTED).apply { setPadding(0, dp(12), 0, 0) })
         shapeCard.addView(row(*Units.lengthUnits.mapIndexed { i, u ->
             chip(t(u.en, u.ur), i == lenUnit) { saveManualVals(); lenUnit = i; showTab(1) }
@@ -397,57 +476,50 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
         val u = Units.lengthUnits[lenUnit]
         val un = t(u.en.lowercase(), u.ur)
-        val fields: List<String> = when (shape) {
-            0 -> listOf(t("Length", "لمبائی"), t("Width", "چوڑائی"))
-            1 -> listOf(t("Side 1 (corner 1 → 2)", "پہلی طرف (کونا 1 سے 2)"),
-                        t("Side 2 (corner 2 → 3)", "دوسری طرف (کونا 2 سے 3)"),
-                        t("Side 3 (corner 3 → 4)", "تیسری طرف (کونا 3 سے 4)"),
-                        t("Side 4 (corner 4 → 1)", "چوتھی طرف (کونا 4 سے 1)"),
-                        t("Diagonal (corner 1 → 3), for exact area", "وتر (کونا 1 سے 3) درست رقبے کے لیے"))
-            else -> listOf(t("Side 1", "پہلی طرف"), t("Side 2", "دوسری طرف"), t("Side 3", "تیسری طرف"))
-        }
         val inCard = card()
-        fields.forEachIndexed { i, label ->
-            inCard.addView(text("$label ($un)", 13f, Ui.MUTED).apply { setPadding(0, if (i == 0) 0 else dp(10), 0, dp(4)) })
-            val e = EditText(this).apply {
-                inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-                textSize = 18f; setTextColor(Ui.TEXT); hint = "0"
-                background = rounded(Ui.BG, 12, Ui.LINE)
-                setPadding(dp(14), dp(12), dp(14), dp(12))
-                textDirection = View.TEXT_DIRECTION_LTR
-                setText(manualVals.getOrNull(i) ?: "")
-                addTextChangedListener(object : TextWatcher {
-                    override fun afterTextChanged(s: Editable?) = recomputeManual()
-                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                })
-            }
-            inputs.add(e)
-            inCard.addView(e, lp())
+        fun pair(a: View, b: View?) {
+            val r = if (b != null) row(a, b, gapDp = 10) else a
+            inCard.addView(r, lp().apply { bottomMargin = dp(10) })
         }
+        when (shape) {
+            0 -> pair(numberInput(t("Length", "لمبائی") + " ($un)", 0), numberInput(t("Width", "چوڑائی") + " ($un)", 1))
+            1 -> {
+                pair(numberInput(t("Side 1 (1→2)", "طرف 1 (1←2)"), 0), numberInput(t("Side 2 (2→3)", "طرف 2 (2←3)"), 1))
+                pair(numberInput(t("Side 3 (3→4)", "طرف 3 (3←4)"), 2), numberInput(t("Side 4 (4→1)", "طرف 4 (4←1)"), 3))
+                pair(numberInput(t("Diagonal 1→3 ($un) for EXACT area", "وتر 1 سے 3 ($un) درست رقبے کے لیے"), 4), null)
+            }
+            else -> {
+                pair(numberInput(t("Side 1", "طرف 1"), 0), numberInput(t("Side 2", "طرف 2"), 1))
+                pair(numberInput(t("Side 3", "طرف 3"), 2), null)
+            }
+        }
+        if (shape != 0) inCard.addView(text(t("All sides in $un", "تمام اطراف $un میں"), 12f, Ui.MUTED))
+        inputs.lastOrNull()?.imeOptions = EditorInfo.IME_ACTION_DONE
         col.addView(inCard)
 
-        val mapCard = card().apply { setPadding(dp(8), dp(8), dp(8), dp(8)) }
+        val mapCard = card().apply { setPadding(dp(6), dp(6), dp(6), dp(6)) }
         manView = FieldView(this)
-        mapCard.addView(manView, lp(h = dp(230)))
+        mapCard.addView(manView, lp(h = dp(220)))
         col.addView(mapCard)
 
-        val res = card()
-        res.addView(text(t("Area", "رقبہ"), 13f, Ui.MUTED))
-        manArea = text("", 24f, Ui.GREEN, true); manSub = text("", 13f, Ui.MUTED)
-        res.addView(manArea); res.addView(manSub)
+        val tableCard = card()
+        tableCard.addView(text(t("In all units", "تمام اکائیوں میں"), 15f, Ui.TEXT, true))
         manTable = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        res.addView(manTable, lp().apply { topMargin = dp(10) })
-        col.addView(res)
+        tableCard.addView(manTable, lp().apply { topMargin = dp(8) })
+        col.addView(tableCard)
 
-        col.addView(button(t("✓  Save this field", "✓  زمین محفوظ کریں")) {
+        // ---- Sticky bottom: live result while typing ----
+        manArea = text("", 21f, Ui.GREEN, true)
+        manSub = text("", 12f, Ui.MUTED).apply { maxLines = 3 }
+        sticky.addView(manArea); sticky.addView(manSub)
+        sticky.addView(button(t("✓  Save this field", "✓  زمین محفوظ کریں")) {
             if (manSqft <= 0) { toast(t("Enter the sides first", "پہلے اطراف لکھیں")); return@button }
             val sq = manSqft
             askName { name ->
                 store.add(FieldStore.Field(name, System.currentTimeMillis(), sq, "Manual", emptyList()))
                 toast(t("Saved", "محفوظ ہو گیا"))
             }
-        })
+        }, lp().apply { topMargin = dp(8) })
         recomputeManual()
     }
 
@@ -478,16 +550,15 @@ class MainActivity : AppCompatActivity(), LocationListener {
                             sqft = t1 + t2
                             pts = listOf(P(0.0, 0.0), Geo.triPoint(diag, a, b, true), P(diag, 0.0), Geo.triPoint(diag, d, c, false))
                             labels = listOf(lab(a), lab(b), lab(c), lab(d))
-                            note = t("✓ Exact (two triangles, Heron's formula)", "✓ درست حساب (دو تکون، ہیرون کا فارمولا)")
+                            note = t("✓ Exact area (two triangles, Heron's formula)", "✓ درست رقبہ (دو تکون، ہیرون کا فارمولا)")
                         }
                     } else {
-                        // Traditional patwari method: average opposite sides
                         sqft = ((a + c) / 2) * ((b + d) / 2)
                         val l = (a + c) / 2; val w = (b + d) / 2
                         pts = listOf(P(0.0, 0.0), P(l, 0.0), P(l, w), P(0.0, w))
                         labels = listOf(lab(a), lab(b), lab(c), lab(d))
-                        note = t("≈ Patwari method (average of opposite sides). It gives a bit MORE than the true area if the field is not square. Add the diagonal for the exact area.",
-                            "≈ پٹواری طریقہ (آمنے سامنے اطراف کی اوسط)۔ اگر کھیت ٹیڑھا ہو تو رقبہ کچھ زیادہ آتا ہے۔ درست رقبے کے لیے وتر بھی لکھیں۔")
+                        note = t("≈ Patwari method. A bit MORE than true area if the field isn't square. Add the diagonal for exact.",
+                            "≈ پٹواری طریقہ۔ ٹیڑھے کھیت میں رقبہ کچھ زیادہ آتا ہے۔ درست رقبے کے لیے وتر لکھیں۔")
                     }
                 }
             }
@@ -508,11 +579,12 @@ class MainActivity : AppCompatActivity(), LocationListener {
         view.set(pts, labels, null, pts.size >= 3, t("Enter the sides above", "اوپر اطراف لکھیں"))
         if (sqft > 0) {
             manArea?.text = Units.breakdown(sqft, mode, urdu)
-            manSub?.text = note
+            manSub?.text = (if (note.isNotEmpty()) "$note\n" else "") +
+                    "≈ ${Units.num(sqft / Units.ACRE)} ${t("acre", "ایکڑ")}  •  ${Units.num(sqft)} ${t("sq ft", "مربع فٹ")}"
             manTable?.let { fillTable(it, sqft) }
         } else {
-            manArea?.text = "—"
-            manSub?.text = note
+            manArea?.text = t("Area: —", "رقبہ: —")
+            manSub?.text = note.ifEmpty { t("Type the sides. The area updates as you type.", "اطراف لکھیں، رقبہ ساتھ ساتھ نظر آئے گا۔") }
             manTable?.removeAllViews()
         }
     }
@@ -523,28 +595,41 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private fun buildSaved(col: LinearLayout) {
         val list = store.all()
         if (list.isEmpty()) {
-            val c = card()
-            c.addView(text(t("No saved fields yet", "ابھی کوئی زمین محفوظ نہیں"), 17f, Ui.TEXT, true))
+            val c = card().apply { gravity = Gravity.CENTER_HORIZONTAL; setPadding(dp(20), dp(32), dp(20), dp(32)) }
+            c.addView(ImageView(this).apply { setImageResource(R.drawable.ic_folder); setColorFilter(Ui.LINE) },
+                LinearLayout.LayoutParams(dp(64), dp(64)))
+            c.addView(text(t("No saved fields yet", "ابھی کوئی زمین محفوظ نہیں"), 17f, Ui.TEXT, true).apply { gravity = Gravity.CENTER })
             c.addView(text(t("Measure a field with GPS or by hand, then tap Save.",
-                "GPS یا ہاتھ سے زمین ناپیں، پھر محفوظ کریں دبائیں۔"), 14f, Ui.MUTED))
+                "GPS یا ہاتھ سے زمین ناپیں، پھر محفوظ کریں دبائیں۔"), 14f, Ui.MUTED).apply { gravity = Gravity.CENTER })
             col.addView(c); return
         }
+        // Summary header
+        val total = list.sumOf { it.sqft }
+        val head = card().apply { background = rounded(Ui.LIGHT, 18) }
+        head.addView(text(t("${list.size} fields • total", "${list.size} زمینیں • کل رقبہ"), 13f, Ui.MUTED))
+        head.addView(text(Units.breakdown(total, mode, urdu), 19f, Ui.GREEN, true))
+        col.addView(head)
+
         val fmt = SimpleDateFormat("d MMM yyyy, h:mm a", Locale.US)
         list.withIndex().reversed().forEach { (idx, f) ->
             val c = card()
-            c.addView(text(f.name, 18f, Ui.TEXT, true))
-            c.addView(text(fmt.format(Date(f.date)) + "  •  " +
-                    (if (f.method == "GPS") "GPS" else t("By hand", "ہاتھ سے")), 12f, Ui.MUTED))
+            val title = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            title.addView(text(f.name, 18f, Ui.TEXT, true), lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            title.addView(text(if (f.method == "GPS") "GPS" else t("By hand", "ہاتھ سے"), 11f, Ui.GREEN2, true).apply {
+                background = rounded(Ui.LIGHT, 10); setPadding(dp(8), dp(3), dp(8), dp(3))
+            })
+            c.addView(title)
+            c.addView(text(fmt.format(Date(f.date)), 12f, Ui.MUTED))
             c.addView(text(Units.breakdown(f.sqft, mode, urdu), 20f, Ui.GREEN, true).apply { setPadding(0, dp(6), 0, dp(2)) })
             c.addView(text("≈ ${Units.num(f.sqft / Units.ACRE)} ${t("acre", "ایکڑ")}  •  ${Units.num(f.sqft)} ${t("sq ft", "مربع فٹ")}", 13f, Ui.MUTED))
-            val details = button(t("All units", "تمام اکائیاں"), false) {
+            val details = button(t("All units", "اکائیاں"), false, small = true) {
                 val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), 0)
-                    layoutDirection = if (urdu) View.LAYOUT_DIRECTION_RTL else View.LAYOUT_DIRECTION_LTR }
+                    layoutDirection = dirFlag }
                 fillTable(box, f.sqft)
                 AlertDialog.Builder(this).setTitle(f.name).setView(box).setPositiveButton("OK", null).show()
             }
-            val share = button(t("Share", "شیئر"), true) { share(f) }
-            val del = button(t("Delete", "مٹائیں"), false) {
+            val share = button(t("Share", "شیئر"), true, small = true) { share(f) }
+            val del = button(t("Delete", "مٹائیں"), false, small = true) {
                 AlertDialog.Builder(this).setMessage(t("Delete \"${f.name}\"?", "\"${f.name}\" مٹا دیں؟"))
                     .setPositiveButton(t("Delete", "مٹائیں")) { _, _ -> store.delete(idx); showTab(2) }
                     .setNegativeButton(t("Cancel", "رہنے دیں"), null).show()
@@ -580,7 +665,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
         Units.table(mode).forEachIndexed { i, u ->
             val r = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setPadding(dp(4), dp(8), dp(4), dp(8))
+                setPadding(dp(8), dp(9), dp(8), dp(9))
                 if (i % 2 == 0) background = rounded(Ui.LIGHT, 8)
             }
             r.addView(text(t(u.en, u.ur), 14f, Ui.TEXT), lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -614,5 +699,24 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 prefs.edit().putBoolean("society", w == 1).apply()
                 d.dismiss(); saveManualVals(); build()
             }.show()
+    }
+
+    private fun showIntro() {
+        AlertDialog.Builder(this)
+            .setTitle(t("Welcome to Zameen Naap", "زمین ناپ میں خوش آمدید"))
+            .setMessage(t(
+                "Measure any field without internet.\n\n" +
+                "📍 GPS walk: stand on each corner and tap \"Mark corner\".\n\n" +
+                "📏 By hand: enter sides in karam or feet, the patwari way.\n\n" +
+                "📁 Saved: keep fields and share them on WhatsApp.\n\n" +
+                "Results in murabba, acre, kanal, marla and sarsai.",
+                "بغیر انٹرنیٹ کے کوئی بھی زمین ناپیں۔\n\n" +
+                "📍 GPS سے: ہر کونے پر کھڑے ہو کر \"کونا لگائیں\" دبائیں۔\n\n" +
+                "📏 ہاتھ سے: پٹواری کی طرح کرم یا فٹ میں اطراف لکھیں۔\n\n" +
+                "📁 محفوظ: زمینیں محفوظ کریں اور واٹس ایپ پر بھیجیں۔\n\n" +
+                "نتیجہ مربع، ایکڑ، کنال، مرلہ اور سرسائی میں۔"))
+            .setPositiveButton(t("Start", "شروع کریں")) { _, _ -> prefs.edit().putBoolean("seenIntro", true).apply() }
+            .setCancelable(false)
+            .show()
     }
 }

@@ -54,11 +54,13 @@ private fun Context.pressable(v: View, bg: Int, radius: Int, stroke: Int? = null
     v.isClickable = true; v.isFocusable = true
 }
 
-fun Context.button(s: String, filled: Boolean = true, onClick: () -> Unit) = TextView(this).apply {
-    text = s; textSize = 16f; gravity = Gravity.CENTER
+fun Context.button(s: String, filled: Boolean = true, small: Boolean = false, onClick: () -> Unit) = TextView(this).apply {
+    text = s; textSize = if (small) 14f else 16f; gravity = Gravity.CENTER
     setTypeface(typeface, Typeface.BOLD)
     setTextColor(if (filled) Color.WHITE else Ui.GREEN)
-    setPadding(dp(14), dp(14), dp(14), dp(14))
+    minHeight = dp(48)                       // comfortable thumb size
+    val v = if (small) 10 else 14
+    setPadding(dp(10), dp(v), dp(10), dp(v))
     pressable(this, if (filled) Ui.GREEN2 else Color.WHITE, 14, if (filled) null else Ui.GREEN2)
     setOnClickListener { onClick() }
 }
