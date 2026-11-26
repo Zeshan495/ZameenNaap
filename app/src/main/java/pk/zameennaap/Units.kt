@@ -72,6 +72,30 @@ object Units {
         return parts.joinToString("  ") { (n, name) -> "$n ${if (urdu) name.second else name.first}" }
     }
 
+    /** Pakistani digit grouping: 12345678 -> "1,23,45,678" */
+    fun pkGroup(v: Long): String {
+        val s = kotlin.math.abs(v).toString()
+        if (s.length <= 3) return (if (v < 0) "-" else "") + s
+        val last3 = s.takeLast(3)
+        var rest = s.dropLast(3)
+        val groups = mutableListOf<String>()
+        while (rest.length > 2) { groups.add(0, rest.takeLast(2)); rest = rest.dropLast(2) }
+        if (rest.isNotEmpty()) groups.add(0, rest)
+        return (if (v < 0) "-" else "") + groups.joinToString(",") + "," + last3
+    }
+
+    /** "Rs 1,23,45,000  (1 crore 23 lakh 45 thousand)" */
+    fun pkr(v: Double, urdu: Boolean): String {
+        val r = v.roundToLong()
+        val crore = r / 10_000_000; val lakh = (r % 10_000_000) / 100_000; val th = (r % 100_000) / 1000
+        val words = mutableListOf<String>()
+        if (crore > 0) words.add("$crore ${if (urdu) "کروڑ" else "crore"}")
+        if (lakh > 0) words.add("$lakh ${if (urdu) "لاکھ" else "lakh"}")
+        if (th > 0) words.add("$th ${if (urdu) "ہزار" else "thousand"}")
+        val head = (if (urdu) "روپے " else "Rs ") + pkGroup(r)
+        return if (words.isEmpty()) head else "$head\n(${words.joinToString(" ")})"
+    }
+
     fun num(v: Double): String = when {
         v >= 1000 -> String.format(Locale.US, "%,.0f", v)
         v >= 10 -> String.format(Locale.US, "%,.1f", v)

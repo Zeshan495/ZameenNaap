@@ -8,6 +8,8 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.Typeface
+import android.location.GnssStatus
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -33,6 +35,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import org.json.JSONArray
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -57,7 +60,11 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private val captureBuf = mutableListOf<Location>()
     private var autoWalk = false
     private var gpsView: FieldView? = null
-    private var gpsStatus: TextView? = null
+    private var accPill: TextView? = null
+    private var satPill: TextView? = null
+    private var livePill: TextView? = null
+    private var satsUsed = 0
+    private var satsSeen = 0
     private var gpsArea: TextView? = null
     private var gpsSub: TextView? = null
     private var captureBtn: TextView? = null
@@ -78,6 +85,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private fun f1(v: Double) = String.format(Locale.US, "%.1f", v)
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
     private val dirFlag get() = if (urdu) View.LAYOUT_DIRECTION_RTL else View.LAYOUT_DIRECTION_LTR
+    private fun karam(m: Double) = f1(m * 3.2808399 / 5.5) + t(" karam", " کرم")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -92,6 +100,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
         run { window.statusBarColor = Color.TRANSPARENT; window.navigationBarColor = Color.WHITE }
         lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         tone = runCatching { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 90) }.getOrNull()
+        loadDraft()
         build()
         if (!hasGps()) requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 7)
         if (!prefs.getBoolean("seenIntro", false)) showIntro()
@@ -108,7 +117,34 @@ class MainActivity : AppCompatActivity(), LocationListener {
     }
 
     override fun onResume() { super.onResume(); startGps() }
-    override fun onPause() { super.onPause(); lm?.removeUpdates(this) }
+    override fun onPause() {
+        super.onPause()
+        lm?.removeUpdates(this)
+        runCatching { lm?.unregisterGnssStatusCallback(gnssCb) }
+    }
+
+    /** Counts satellites: shows the user WHY accuracy is weak (few satellites = trees/roof overhead). */
+    private val gnssCb = object : GnssStatus.Callback() {
+        override fun onSatelliteStatusChanged(status: GnssStatus) {
+            satsSeen = status.satelliteCount
+            satsUsed = (0 until status.satelliteCount).count { status.usedInFix(it) }
+            if (tab == 0) refreshStatus()
+        }
+    }
+
+    // Corners are saved instantly, so nothing is lost if the phone locks or the app closes
+    private fun saveDraft() {
+        val a = JSONArray()
+        corners.forEach { a.put(JSONArray().put(it.lat).put(it.lon).put(it.sigmaM)) }
+        prefs.edit().putString("draft", a.toString()).apply()
+    }
+    private fun loadDraft() {
+        val a = runCatching { JSONArray(prefs.getString("draft", "[]")) }.getOrNull() ?: return
+        corners.clear()
+        for (i in 0 until a.length()) {
+            val p = a.getJSONArray(i); corners.add(Corner(p.getDouble(0), p.getDouble(1), p.getDouble(2)))
+        }
+    }
 
     private fun startGps() {
         if (!hasGps()) return
@@ -116,6 +152,8 @@ class MainActivity : AppCompatActivity(), LocationListener {
             lm?.removeUpdates(this)
             // GPS_PROVIDER = satellites only. Works with no internet and no SIM.
             lm?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
+            @Suppress("DEPRECATION")
+            lm?.registerGnssStatusCallback(gnssCb, handler)
             lastFix = lm?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
                 ?.takeIf { System.currentTimeMillis() - it.time < 30_000 }
         } catch (e: SecurityException) { }
@@ -154,6 +192,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
         })
         top.addView(topPill(t("Marla ", "مرلہ ") + (if (mode == MarlaMode.REVENUE) "272" else "225")) { marlaDialog() },
             lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(8) })
+        top.addView(topPill(" ? ") { showIntro() }, lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(8) })
         root.addView(top)
 
         content = FrameLayout(this)
@@ -165,9 +204,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
             elevation = dp(8).toFloat()
         }
         val tabs = listOf(
-            Triple(R.drawable.ic_gps, "GPS walk", "GPS سے ناپیں"),
-            Triple(R.drawable.ic_ruler, "By hand", "ہاتھ سے (کرم)"),
-            Triple(R.drawable.ic_folder, "Saved", "محفوظ زمینیں")
+            Triple(R.drawable.ic_gps, "GPS", "GPS"),
+            Triple(R.drawable.ic_ruler, "By hand", "ہاتھ سے"),
+            Triple(R.drawable.ic_folder, "Saved", "محفوظ")
         )
         tabs.forEachIndexed { i, (icon, en, ur) ->
             val item = LinearLayout(this).apply {
@@ -176,7 +215,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 setOnClickListener { saveManualVals(); showTab(i) }
             }
             val iv = ImageView(this).apply { setImageResource(icon) }
-            val tv = text(t(en, ur), 12f).apply { gravity = Gravity.CENTER }
+            val tv = text(t(en, ur), 13f).apply { gravity = Gravity.CENTER; maxLines = 1 }
             item.addView(iv, LinearLayout.LayoutParams(dp(26), dp(26)))
             item.addView(tv)
             navItems.add(iv to tv)
@@ -210,7 +249,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             iv.setColorFilter(c); tv.setTextColor(c)
             tv.setTypeface(null, if (j == i) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
         }
-        gpsView = null; manView = null; captureProg = null
+        gpsView = null; manView = null; captureProg = null; accPill = null; livePill = null
         content.removeAllViews()
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -229,7 +268,8 @@ class MainActivity : AppCompatActivity(), LocationListener {
             else -> buildSaved(col)
         }
         val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        page.addView(ScrollView(this).apply { addView(col); isFillViewport = true }, lp(h = 0, weight = 1f))
+        if (i == 0) page.addView(col, lp(h = 0, weight = 1f))      // map fills the screen, no scrolling
+        else page.addView(ScrollView(this).apply { addView(col); isFillViewport = true }, lp(h = 0, weight = 1f))
         if (sticky.childCount > 0) page.addView(sticky)
         content.addView(page)
     }
@@ -237,166 +277,206 @@ class MainActivity : AppCompatActivity(), LocationListener {
     // =====================================================================
     // TAB 1: GPS walk-around
     // =====================================================================
+    private fun statusChip(): TextView = TextView(this).apply {
+        textSize = 13f; setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
+        setPadding(dp(12), dp(8), dp(12), dp(8)); maxLines = 1
+    }
+
+    private fun styleChip(v: TextView, c: Int) {
+        v.setTextColor(c)
+        v.background = rounded(Color.argb(30, Color.red(c), Color.green(c), Color.blue(c)), 18)
+    }
+
     private fun buildGps(col: LinearLayout, sticky: LinearLayout) {
-        // Status pill
-        gpsStatus = text("", 14f, Ui.MUTED, true).apply {
-            background = rounded(Color.WHITE, 22, Ui.LINE)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-        }
-        col.addView(gpsStatus, lp().apply { bottomMargin = dp(10) })
+        // ---- Status chips: accuracy, satellites, clear ----
+        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        accPill = statusChip(); satPill = statusChip()
+        chips.addView(accPill)
+        chips.addView(satPill, lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(6) })
+        chips.addView(View(this), lp(0, 1, 1f))
+        chips.addView(statusChip().apply {
+            text = t("Clear", "مٹائیں"); setTextColor(Ui.RED); background = rounded(Color.WHITE, 18, Ui.LINE)
+            setOnClickListener {
+                if (corners.isEmpty()) return@setOnClickListener
+                AlertDialog.Builder(this@MainActivity).setMessage(t("Remove all corners?", "سارے کونے مٹا دیں؟"))
+                    .setPositiveButton(t("Yes", "ہاں")) { _, _ -> corners.clear(); saveDraft(); refreshGps() }
+                    .setNegativeButton(t("No", "نہیں"), null).show()
+            }
+        })
+        col.addView(chips, lp().apply { bottomMargin = dp(10) })
 
-        // Big field drawing: about half the screen
+        // ---- Map fills all remaining space, with a live-distance pill ----
         val mapCard = card().apply { setPadding(dp(6), dp(6), dp(6), dp(6)) }
+        val frame = FrameLayout(this)
         gpsView = FieldView(this)
-        val mapH = (resources.displayMetrics.heightPixels * 0.46).toInt()
-        mapCard.addView(gpsView, lp(h = mapH))
-        col.addView(mapCard)
-
-        val clear = button(t("Clear all corners", "سارے کونے مٹائیں"), false, small = true) {
-            if (corners.isEmpty()) return@button
-            AlertDialog.Builder(this).setMessage(t("Remove all corners?", "سارے کونے مٹا دیں؟"))
-                .setPositiveButton(t("Yes", "ہاں")) { _, _ -> corners.clear(); refreshGps() }
-                .setNegativeButton(t("No", "نہیں"), null).show()
+        frame.addView(gpsView, FrameLayout.LayoutParams(-1, -1))
+        livePill = TextView(this).apply {
+            textSize = 13f; setTextColor(Ui.TEXT); setTypeface(typeface, Typeface.BOLD)
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = rounded(Color.argb(240, 255, 255, 255), 14, Ui.LINE)
+            visibility = View.GONE
         }
-        col.addView(clear, lp().apply { bottomMargin = dp(12) })
-
-        val tips = card()
-        tips.addView(text(t("How to measure", "کیسے ناپیں"), 15f, Ui.TEXT, true))
-        tips.addView(text(t(
-            "1. Stand in open sky (not under trees) until the light is green.\n" +
-            "2. Stand exactly on corner 1 → press \"Mark corner\" → stay still 8 seconds (beep).\n" +
-            "3. Walk to the next corner IN ORDER around the field and repeat.\n" +
-            "4. Curved edge? Turn on \"Auto\" and walk along the boundary.\n" +
-            "Small plot? Use the \"By hand\" tab with a tape for best accuracy.",
-            "1۔ کھلے آسمان تلے (درختوں سے دور) کھڑے ہوں جب تک روشنی سبز نہ ہو۔\n" +
-            "2۔ پہلے کونے پر بالکل کھڑے ہو کر \"کونا لگائیں\" دبائیں، 8 سیکنڈ ساکت رہیں (بیپ آئے گی)۔\n" +
-            "3۔ کھیت کے گرد ترتیب سے اگلے کونے پر جائیں اور یہی کریں۔\n" +
-            "4۔ حد ٹیڑھی ہو تو \"خودکار\" آن کر کے حد کے ساتھ چلیں۔\n" +
-            "چھوٹا پلاٹ؟ زیادہ درستگی کے لیے \"ہاتھ سے\" والا حصہ فیتے کے ساتھ استعمال کریں۔"),
-            14f, Ui.MUTED).apply { setPadding(0, dp(6), 0, 0) })
-        col.addView(tips)
+        frame.addView(livePill, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply {
+            setMargins(dp(10), dp(10), dp(10), dp(10))
+        })
+        mapCard.addView(frame, lp(h = 0, weight = 1f))
+        col.addView(mapCard, lp(h = 0, weight = 1f))
 
         // ---- Sticky bottom: result + actions ----
         gpsArea = text("", 21f, Ui.GREEN, true)
-        gpsSub = text("", 12f, Ui.MUTED).apply { maxLines = 3 }
+        gpsSub = text("", 12.5f, Ui.MUTED).apply { maxLines = 3 }
         sticky.addView(gpsArea); sticky.addView(gpsSub)
         captureBtn = button(t("＋  Mark corner here", "＋  یہاں کونا لگائیں")) { startCapture() }.apply {
             textSize = 18f; minHeight = dp(56)
         }
         sticky.addView(captureBtn, lp().apply { topMargin = dp(8) })
         captureProg = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 8; progress = 0; visibility = if (capturing) View.VISIBLE else View.GONE
+            max = 80; progress = 0; visibility = if (capturing) View.VISIBLE else View.GONE
             progressTintList = ColorStateList.valueOf(Ui.GREEN2)
         }
         sticky.addView(captureProg, lp())
 
         val undo = button(t("↶ Undo", "↶ واپس"), false, small = true) {
-            if (corners.isNotEmpty()) corners.removeAt(corners.size - 1); refreshGps()
+            if (corners.isNotEmpty()) { corners.removeAt(corners.size - 1); saveDraft() }
+            refreshGps()
         }
-        val auto = button(if (autoWalk) t("Auto: ON", "خودکار: آن") else t("Auto", "خودکار"), autoWalk, small = true) {}
+        val auto = button(if (autoWalk) t("● Auto ON", "● خودکار آن") else t("Auto walk", "خودکار"), autoWalk, small = true) {}
         auto.setOnClickListener {
             autoWalk = !autoWalk
-            toast(if (autoWalk) t("Auto: walk along the boundary, a point is added every 3 m",
-                "خودکار: حد کے ساتھ چلیں، ہر 3 میٹر پر نقطہ لگے گا") else t("Auto off", "خودکار بند"))
+            toast(if (autoWalk) t("Walk along the boundary. A point is added every 3 m.",
+                "حد کے ساتھ ساتھ چلیں، ہر 3 میٹر پر نقطہ لگے گا۔") else t("Auto off", "خودکار بند"))
             showTab(0)
         }
-        val save = button(t("✓ Save", "✓ محفوظ"), false, small = true) {
-            if (corners.size < 3) { toast(t("Mark at least 3 corners first", "پہلے کم از کم 3 کونے لگائیں")); return@button }
-            val sqft = gpsSqft()
-            askName { name ->
-                store.add(FieldStore.Field(name, System.currentTimeMillis(), sqft, "GPS",
-                    corners.map { LatLon(it.lat, it.lon) }))
-                corners.clear(); refreshGps()
-                toast(t("Saved", "محفوظ ہو گیا"))
-            }
-        }
+        val save = button(t("✓ Save", "✓ محفوظ"), false, small = true) { saveGpsField() }
         sticky.addView(row(undo, auto, save), lp().apply { topMargin = dp(8) })
         refreshGps()
     }
 
     private fun projectedCorners(): Pair<List<P>, P?> {
         val ll = corners.map { LatLon(it.lat, it.lon) }
-        val fix = lastFix
-        val cur = fix?.let { LatLon(it.latitude, it.longitude) }
+        val cur = lastFix?.let { LatLon(it.latitude, it.longitude) }
         val ref = if (ll.isNotEmpty()) Geo.centroid(ll) else cur ?: return emptyList<P>() to null
-        val pts = Geo.project(ll, ref)
-        return pts to cur?.let { Geo.project(listOf(it), ref)[0] }
+        return Geo.project(ll, ref) to cur?.let { Geo.project(listOf(it), ref)[0] }
     }
 
     private fun gpsSqft() = Geo.area(projectedCorners().first) * Units.SQM_TO_SQFT
 
-    private fun refreshGps() {
-        val status = gpsStatus ?: return
+    private fun refreshStatus() {
+        val acc = accPill ?: return
+        val sat = satPill ?: return
         val fix = lastFix
         val gpsOn = lm?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true
-        status.setOnClickListener(null)
+        acc.setOnClickListener(null)
         when {
-            !hasGps() -> { status.text = t("● Location permission needed. Tap here.", "● لوکیشن کی اجازت چاہیے۔ یہاں دبائیں۔"); status.setTextColor(Ui.RED)
-                status.setOnClickListener { requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 7) } }
-            !gpsOn -> { status.text = t("● GPS is off. Tap to turn on.", "● GPS بند ہے۔ آن کرنے کے لیے دبائیں۔"); status.setTextColor(Ui.RED)
-                status.setOnClickListener { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) } }
-            fix == null -> { status.text = t("● Searching satellites… stand in open sky", "● سیٹلائٹ تلاش ہو رہے ہیں… کھلی جگہ پر کھڑے ہوں"); status.setTextColor(Ui.AMBER) }
+            !hasGps() -> { acc.text = t("Allow location", "لوکیشن کی اجازت دیں"); styleChip(acc, Ui.RED)
+                acc.setOnClickListener { requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 7) } }
+            !gpsOn -> { acc.text = t("GPS off: tap", "GPS بند: دبائیں"); styleChip(acc, Ui.RED)
+                acc.setOnClickListener { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) } }
+            fix == null -> { acc.text = t("Finding GPS…", "GPS تلاش ہو رہا ہے…"); styleChip(acc, Ui.AMBER) }
             else -> {
-                val acc = fix.accuracy
-                val q = when { acc <= 5 -> t("Excellent", "بہترین"); acc <= 10 -> t("OK", "ٹھیک"); else -> t("Weak, wait", "کمزور، انتظار کریں") }
-                status.text = t("● GPS ±%.0f m  •  %s", "● GPS درستگی ±%.0f میٹر  •  %s").format(Locale.US, acc, q) +
-                        if (capturing) t("  •  recording…", "  •  محفوظ ہو رہا ہے…") else ""
-                status.setTextColor(when { acc <= 5 -> Ui.GREEN2; acc <= 10 -> Ui.AMBER; else -> Ui.RED })
+                val a = fix.accuracy
+                acc.text = "± ${a.toInt()} " + t("m", "میٹر") + "  •  " + when {
+                    a <= 5 -> t("Excellent", "بہترین"); a <= 10 -> t("OK", "ٹھیک"); else -> t("Wait", "انتظار کریں") }
+                styleChip(acc, when { a <= 5 -> Ui.GREEN2; a <= 10 -> Ui.AMBER; else -> Ui.RED })
+                acc.setOnClickListener {
+                    toast(t("Tip: move away from trees, walls and roofs. Accuracy improves after 1–2 minutes in open sky.",
+                        "مشورہ: درختوں، دیواروں اور چھت سے دور ہو جائیں۔ کھلی جگہ پر 1–2 منٹ میں درستگی بہتر ہو جاتی ہے۔"))
+                }
             }
         }
+        sat.text = "🛰 $satsUsed/$satsSeen"
+        styleChip(sat, when { satsUsed >= 8 -> Ui.GREEN2; satsUsed >= 4 -> Ui.AMBER; else -> Ui.MUTED })
+    }
 
+    private fun refreshGps() {
+        refreshStatus()
+        val view = gpsView ?: return
         val (pts, cur) = projectedCorners()
-        val karam = Units.lengthUnits[0].ft
-        val labels = pts.indices.map { i ->
-            val m = Geo.dist(pts[i], pts[(i + 1) % pts.size])
-            f1(m * 3.2808399 / karam) + t(" karam", " کرم")
+        val labels = pts.indices.map { i -> karam(Geo.dist(pts[i], pts[(i + 1) % pts.size])) }
+        view.set(pts, labels, cur, pts.size >= 3, t("Stand on the first corner", "پہلے کونے پر کھڑے ہوں"),
+            accuracy = lastFix?.accuracy?.toDouble() ?: 0.0, minimumSpan = 25.0, unitName = t("m", "میٹر"))
+
+        // Live distance from the last corner (and back to corner 1)
+        val pill = livePill
+        if (pill != null) {
+            if (cur != null && pts.isNotEmpty()) {
+                var s = t("From corner ${pts.size}: ", "کونا ${pts.size} سے: ") + karam(Geo.dist(pts.last(), cur))
+                if (pts.size >= 2) s += "\n" + t("To corner 1: ", "کونا 1 تک: ") + karam(Geo.dist(pts[0], cur))
+                pill.text = s; pill.visibility = View.VISIBLE
+            } else pill.visibility = View.GONE
         }
-        gpsView?.set(pts, labels, cur, pts.size >= 3,
-            t("Stand on the first corner", "پہلے کونے پر کھڑے ہوں"))
 
         if (pts.size >= 3) {
             val sqft = Geo.area(pts) * Units.SQM_TO_SQFT
             val sig = Geo.areaSigma(pts, corners.map { it.sigmaM }) * Units.SQM_TO_SQFT
             val perFt = Geo.perimeter(pts) * 3.2808399
             gpsArea?.text = Units.breakdown(sqft, mode, urdu)
-            var sub = t("≈ %s acre  •  ± %s marla  •  boundary %s karam  •  %d corners",
-                "≈ %s ایکڑ  •  ± %s مرلہ  •  حد %s کرم  •  %d کونے").format(
-                Units.num(sqft / Units.ACRE), f1(sig / Units.marla(mode)), Units.num(perFt / karam), pts.size)
+            var sub = t("≈ %s acre  •  ± %s marla  •  %d corners  •  boundary %s karam",
+                "≈ %s ایکڑ  •  ± %s مرلہ  •  %d کونے  •  حد %s کرم").format(
+                Units.num(sqft / Units.ACRE), f1(sig / Units.marla(mode)), pts.size, Units.num(perFt / 5.5))
             if (Geo.selfIntersects(pts)) sub += t("\n⚠ Lines cross: corners out of order. Undo and redo.",
                 "\n⚠ لکیریں آپس میں کٹ رہی ہیں: کونے ترتیب سے نہیں۔ واپس کر کے دوبارہ لگائیں۔")
             gpsSub?.text = sub
         } else {
-            gpsArea?.text = t("Mark %d more corner(s)", "مزید %d کونے لگائیں").format(Locale.US, 3 - pts.size)
-            gpsSub?.text = t("Corners marked: %d", "لگائے گئے کونے: %d").format(Locale.US, pts.size)
+            gpsArea?.text = if (pts.isEmpty()) t("Go to corner 1", "پہلے کونے پر جائیں")
+                            else t("Walk to corner %d", "کونا %d کی طرف چلیں").format(Locale.US, pts.size + 1)
+            gpsSub?.text = t("Mark %d more corner(s) to see the area", "رقبہ دیکھنے کے لیے مزید %d کونے لگائیں")
+                .format(Locale.US, 3 - pts.size)
         }
     }
 
     private fun startCapture() {
         if (capturing) return
         val f = lastFix
-        if (f == null || f.accuracy > 30) {
-            toast(t("Waiting for GPS. Stand in open sky for a minute.", "GPS کا انتظار ہے۔ ایک منٹ کھلی جگہ پر کھڑے رہیں۔")); return
+        if (f == null) { toast(t("Waiting for GPS. Stand in open sky.", "GPS کا انتظار ہے۔ کھلی جگہ پر کھڑے ہوں۔")); return }
+        if (f.accuracy > 10) {
+            AlertDialog.Builder(this)
+                .setTitle(t("GPS is weak (±%d m)", "GPS کمزور ہے (±%d میٹر)").format(Locale.US, f.accuracy.toInt()))
+                .setMessage(t("This corner could be off by that much. Move away from trees and roofs and wait 1–2 minutes for green.",
+                    "یہ کونا اتنا غلط لگ سکتا ہے۔ درختوں اور چھت سے دور ہو کر 1–2 منٹ سبز ہونے کا انتظار کریں۔"))
+                .setPositiveButton(t("Mark anyway", "پھر بھی لگائیں")) { _, _ -> doCapture() }
+                .setNegativeButton(t("I'll wait", "انتظار کروں گا"), null).show()
+            return
         }
+        doCapture()
+    }
+
+    /** Records GPS for 8 seconds at the corner and averages it (smooth progress bar). */
+    private fun doCapture() {
+        val f = lastFix ?: return
         capturing = true
         captureBuf.clear(); captureBuf.add(f)
         captureProg?.visibility = View.VISIBLE
         handler.post(object : Runnable {
-            var left = 8
+            var ticks = 0
             override fun run() {
-                captureProg?.progress = 8 - left
-                if (left <= 0) { finishCapture(); return }
-                captureBtn?.text = t("Stay still… %d", "ساکت رہیں… %d").format(Locale.US, left)
-                left--
-                handler.postDelayed(this, 1000)
+                captureProg?.progress = ticks
+                if (ticks >= 80) { finishCapture(); return }
+                captureBtn?.text = t("Stay still… %d", "ساکت رہیں… %d").format(Locale.US, (89 - ticks) / 10)
+                ticks++
+                handler.postDelayed(this, 100)
             }
         })
         refreshGps()
+    }
+
+    private fun saveGpsField() {
+        if (corners.size < 3) { toast(t("Mark at least 3 corners first", "پہلے کم از کم 3 کونے لگائیں")); return }
+        val sqft = gpsSqft()
+        askName { name ->
+            val f = FieldStore.Field(name, System.currentTimeMillis(), sqft, "GPS", corners.map { LatLon(it.lat, it.lon) })
+            store.add(f)
+            corners.clear(); saveDraft(); refreshGps()
+            toast(t("Saved", "محفوظ ہو گیا"))
+            showTools(f)
+        }
     }
 
     private fun finishCapture() {
         capturing = false
         if (captureBuf.isNotEmpty()) {
             corners.add(Geo.averageFixes(captureBuf.map { Triple(it.latitude, it.longitude, it.accuracy.toDouble()) }))
+            saveDraft()
             vibrate()
             runCatching { tone?.startTone(ToneGenerator.TONE_PROP_ACK, 200) }
         }
@@ -419,7 +499,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             val last = corners.lastOrNull()
             val d = FloatArray(1)
             if (last != null) Location.distanceBetween(last.lat, last.lon, loc.latitude, loc.longitude, d)
-            if (last == null || d[0] >= 3f) corners.add(Corner(loc.latitude, loc.longitude, loc.accuracy / 1.5))
+            if (last == null || d[0] >= 3f) { corners.add(Corner(loc.latitude, loc.longitude, loc.accuracy / 1.5)); saveDraft() }
         }
         if (tab == 0) refreshGps()
     }
@@ -512,14 +592,19 @@ class MainActivity : AppCompatActivity(), LocationListener {
         manArea = text("", 21f, Ui.GREEN, true)
         manSub = text("", 12f, Ui.MUTED).apply { maxLines = 3 }
         sticky.addView(manArea); sticky.addView(manSub)
-        sticky.addView(button(t("✓  Save this field", "✓  زمین محفوظ کریں")) {
+        val tools = button(t("₨ Price & divide", "₨ قیمت و تقسیم"), false) {
+            if (manSqft <= 0) toast(t("Enter the sides first", "پہلے اطراف لکھیں"))
+            else showTools(FieldStore.Field(t("This field", "یہ زمین"), System.currentTimeMillis(), manSqft, "Manual", emptyList()), saved = false)
+        }
+        val saveBtn = button(t("✓  Save", "✓  محفوظ کریں")) {
             if (manSqft <= 0) { toast(t("Enter the sides first", "پہلے اطراف لکھیں")); return@button }
             val sq = manSqft
             askName { name ->
                 store.add(FieldStore.Field(name, System.currentTimeMillis(), sq, "Manual", emptyList()))
                 toast(t("Saved", "محفوظ ہو گیا"))
             }
-        }, lp().apply { topMargin = dp(8) })
+        }
+        sticky.addView(row(tools, saveBtn), lp().apply { topMargin = dp(8) })
         recomputeManual()
     }
 
@@ -576,7 +661,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             }
         }
         manSqft = sqft
-        view.set(pts, labels, null, pts.size >= 3, t("Enter the sides above", "اوپر اطراف لکھیں"))
+        view.set(pts, labels, null, pts.size >= 3, t("Enter the sides above", "اوپر اطراف لکھیں"), unitName = t("ft", "فٹ"))
         if (sqft > 0) {
             manArea?.text = Units.breakdown(sqft, mode, urdu)
             manSub?.text = (if (note.isNotEmpty()) "$note\n" else "") +
@@ -620,15 +705,15 @@ class MainActivity : AppCompatActivity(), LocationListener {
             })
             c.addView(title)
             c.addView(text(fmt.format(Date(f.date)), 12f, Ui.MUTED))
+            if (f.points.size >= 3) {
+                val mini = FieldView(this)
+                mini.set(Geo.project(f.points, Geo.centroid(f.points)), emptyList(), null, true, "")
+                c.addView(mini, lp(h = dp(110)).apply { topMargin = dp(8) })
+            }
             c.addView(text(Units.breakdown(f.sqft, mode, urdu), 20f, Ui.GREEN, true).apply { setPadding(0, dp(6), 0, dp(2)) })
             c.addView(text("≈ ${Units.num(f.sqft / Units.ACRE)} ${t("acre", "ایکڑ")}  •  ${Units.num(f.sqft)} ${t("sq ft", "مربع فٹ")}", 13f, Ui.MUTED))
-            val details = button(t("All units", "اکائیاں"), false, small = true) {
-                val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), 0)
-                    layoutDirection = dirFlag }
-                fillTable(box, f.sqft)
-                AlertDialog.Builder(this).setTitle(f.name).setView(box).setPositiveButton("OK", null).show()
-            }
-            val share = button(t("Share", "شیئر"), true, small = true) { share(f) }
+            val details = button(t("Open", "کھولیں"), true, small = true) { showTools(f) }
+            val share = button(t("Share", "شیئر"), false, small = true) { share(f) }
             val del = button(t("Delete", "مٹائیں"), false, small = true) {
                 AlertDialog.Builder(this).setMessage(t("Delete \"${f.name}\"?", "\"${f.name}\" مٹا دیں؟"))
                     .setPositiveButton(t("Delete", "مٹائیں")) { _, _ -> store.delete(idx); showTab(2) }
@@ -637,6 +722,105 @@ class MainActivity : AppCompatActivity(), LocationListener {
             c.addView(row(details, share, del), lp().apply { topMargin = dp(10) })
             col.addView(c)
         }
+    }
+
+    // =====================================================================
+    // Field tools: drawing, price (lakh/crore), divide among heirs, all units
+    // =====================================================================
+    private fun section(parent: LinearLayout, title: String) =
+        parent.addView(text(title, 15f, Ui.TEXT, true).apply { setPadding(0, dp(18), 0, dp(6)) })
+
+    private fun watch(e: EditText, f: () -> Unit) = e.addTextChangedListener(object : TextWatcher {
+        override fun afterTextChanged(s: Editable?) = f()
+        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+    })
+
+    private fun field(hintText: String, numeric: Boolean) = EditText(this).apply {
+        inputType = if (numeric) InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL else InputType.TYPE_CLASS_TEXT
+        textSize = 17f; hint = hintText; textDirection = View.TEXT_DIRECTION_LTR; setTextColor(Ui.TEXT)
+        background = rounded(Ui.BG, 12, Ui.LINE); setPadding(dp(14), dp(11), dp(14), dp(11))
+    }
+
+    private fun showTools(f: FieldStore.Field, saved: Boolean = true) {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(6), dp(20), dp(10)); layoutDirection = dirFlag
+        }
+        if (f.points.size >= 3) {
+            val v = FieldView(this)
+            val pts = Geo.project(f.points, Geo.centroid(f.points))
+            v.set(pts, pts.indices.map { karam(Geo.dist(pts[it], pts[(it + 1) % pts.size])) }, null, true, "",
+                unitName = t("m", "میٹر"))
+            box.addView(v, lp(h = dp(210)).apply { bottomMargin = dp(8) })
+        }
+        box.addView(text(Units.breakdown(f.sqft, mode, urdu), 22f, Ui.GREEN, true))
+        box.addView(text("≈ ${Units.num(f.sqft / Units.ACRE)} ${t("acre", "ایکڑ")}  •  ${Units.num(f.sqft)} ${t("sq ft", "مربع فٹ")}", 13f, Ui.MUTED))
+
+        // ---- Price ----
+        section(box, t("₨  Land price", "₨  زمین کی قیمت"))
+        val rate = field(t("Rate, e.g. 500000", "ریٹ، مثلاً 500000"), true)
+        box.addView(rate, lp())
+        val perUnits = listOf(
+            Triple("per marla", "فی مرلہ", Units.marla(mode)),
+            Triple("per kanal", "فی کنال", Units.kanal(mode)),
+            Triple("per acre", "فی ایکڑ", Units.ACRE))
+        var per = prefs.getInt("rateUnit", 1)
+        val perRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        box.addView(perRow, lp().apply { topMargin = dp(8) })
+        val priceOut = text("", 18f, Ui.GREEN, true).apply { setPadding(0, dp(8), 0, 0) }
+        box.addView(priceOut)
+        val updPrice = {
+            val r = rate.text.toString().replace(",", "").toDoubleOrNull()
+            priceOut.text = if (r == null || r <= 0) t("Enter the rate to see the total price", "کل قیمت دیکھنے کے لیے ریٹ لکھیں")
+                            else Units.pkr(f.sqft / perUnits[per].third * r, urdu)
+        }
+        fun drawPer() {
+            perRow.removeAllViews()
+            perUnits.forEachIndexed { i, (en, ur, _) ->
+                perRow.addView(chip(t(en, ur), i == per) {
+                    per = i; prefs.edit().putInt("rateUnit", i).apply(); drawPer(); updPrice()
+                }, lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { if (i > 0) marginStart = dp(6) })
+            }
+        }
+        drawPer(); watch(rate) { updPrice() }; updPrice()
+
+        // ---- Divide (taqseem) ----
+        section(box, t("⚖  Divide among heirs / partners", "⚖  ورثاء / حصہ داروں میں تقسیم"))
+        box.addView(text(t("Shares: 3 = three equal parts, or 2,2,1,1 = two sons and two daughters",
+            "حصے: 3 = تین برابر حصے، یا 2,2,1,1 = دو بیٹے اور دو بیٹیاں"), 12.5f, Ui.MUTED).apply { setPadding(0, 0, 0, dp(6)) })
+        val shares = field("2,2,1,1", false)
+        box.addView(shares, lp())
+        val divOut = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(6), 0, 0) }
+        box.addView(divOut)
+        watch(shares) {
+            divOut.removeAllViews()
+            var w = shares.text.toString().split(',', '،', ' ', '+', ':', '/')
+                .mapNotNull { it.trim().toDoubleOrNull() }.filter { it > 0 }
+            if (w.size == 1 && w[0] == Math.floor(w[0]) && w[0] in 2.0..100.0) w = List(w[0].toInt()) { 1.0 }
+            if (w.size >= 2) {
+                val sum = w.sum()
+                w.forEachIndexed { i, wi ->
+                    val r = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL; setPadding(dp(8), dp(8), dp(8), dp(8))
+                        if (i % 2 == 0) background = rounded(Ui.LIGHT, 8)
+                    }
+                    r.addView(text(t("Share ${i + 1}", "حصہ ${i + 1}") + "  (${Units.num(wi)}/${Units.num(sum)})", 13.5f, Ui.MUTED),
+                        lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                    r.addView(text(Units.breakdown(f.sqft * wi / sum, mode, urdu), 14.5f, Ui.GREEN, true))
+                    divOut.addView(r)
+                }
+            }
+        }
+
+        // ---- All units ----
+        section(box, t("All units", "تمام اکائیاں"))
+        val tbl = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fillTable(tbl, f.sqft); box.addView(tbl)
+
+        val b = AlertDialog.Builder(this).setTitle(f.name).setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton(t("Close", "بند کریں"), null)
+        if (saved) b.setNeutralButton(t("Share", "شیئر")) { _, _ -> share(f) }
+        b.show()
     }
 
     private fun share(f: FieldStore.Field) {
